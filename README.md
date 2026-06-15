@@ -27,13 +27,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Tianba0116/TianbaAgent/main/
 **Windows（PowerShell）：**
 
 ```powershell
-git clone https://github.com/Tianba0116/TianbaAgent.git
-cd TianbaAgent
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-pip install -e .
-tianba
+powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Tianba0116/TianbaAgent/main/scripts/run.ps1 | iex"
 ```
 
 **Docker：**
