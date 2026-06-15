@@ -346,7 +346,7 @@ function Start-TianbaAgent {
     Write-Success "Starting TianbaAgent..."
     $tianbaBin = Get-Command tianba -ErrorAction SilentlyContinue
     if ($tianbaBin) {
-        & tianbastart
+        & tianba start
     } else {
         Write-Warn "tianba CLI not found, starting directly..."
         & $PythonCmd "$BaseDir\app.py"
@@ -358,7 +358,7 @@ function Invoke-TianbaCommand {
     param([string]$Cmd)
     $tianbaBin = Get-Command tianba -ErrorAction SilentlyContinue
     if ($tianbaBin) {
-        & tianba$Cmd
+        & tianba $Cmd
     } else {
         Write-Err "tianba CLI not found. Run this script without arguments first to install."
         exit 1
@@ -438,7 +438,7 @@ function Update-Project {
     $tianbaBin = Get-Command tianba -ErrorAction SilentlyContinue
     if ($tianbaBin) {
         $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-        & tianbastop 2>&1 | Out-Null
+        & tianba stop 2>&1 | Out-Null
         $ErrorActionPreference = $prevEAP
     }
 
