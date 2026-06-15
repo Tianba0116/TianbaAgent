@@ -124,35 +124,38 @@ function Install-Project {
 function Install-Dependencies {
     Write-Success "Installing dependencies..."
 
-    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    & $PythonCmd -m pip install --upgrade pip setuptools wheel 2>&1 | Out-Null
+    # Create venv for isolated install (no global Python pollution)
+    $VenvDir = "$BaseDir\.venv"
+    $VenvPython = "$VenvDir\Scripts\python.exe"
 
-    & $PythonCmd -m pip install -r "$BaseDir\requirements.txt" 2>&1 | ForEach-Object { Write-Host $_ }
+    if (-not (Test-Path $VenvPython)) {
+        Write-Success "Creating virtual environment at $VenvDir..."
+        & $PythonCmd -m venv $VenvDir 2>&1 | Out-Null
+        Write-Success "Virtual environment created."
+    } else {
+        Write-Success "Using existing virtual environment."
+    }
+
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    & $VenvPython -m pip install --upgrade pip setuptools wheel 2>&1 | Out-Null
+
+    & $VenvPython -m pip install -r "$BaseDir\requirements.txt" 2>&1 | ForEach-Object { Write-Host $_ }
     $pipExit = $LASTEXITCODE
     $ErrorActionPreference = $prevEAP
     if ($pipExit -ne 0) {
         Write-Warn "Some dependencies may have issues, but continuing..."
     }
 
-    Write-Success "Registering tianba CLI..."
+    Write-Success "Registering tianba CLI (inside venv)..."
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    & $PythonCmd -m pip install -e $BaseDir 2>&1 | Out-Null
+    & $VenvPython -m pip install -e $BaseDir 2>&1 | Out-Null
     $ErrorActionPreference = $prevEAP
 
-    # Ensure Python Scripts dir is in PATH for this session
-    $scriptsDir = & $PythonCmd -c "import sysconfig; print(sysconfig.get_path('scripts'))" 2>$null
-    if ($scriptsDir -and (Test-Path $scriptsDir)) {
-        if ($env:PATH -notlike "*$scriptsDir*") {
-            $env:PATH = "$scriptsDir;$env:PATH"
-        }
-    }
-
-    $tianbaBin = Get-Command tianba -ErrorAction SilentlyContinue
-    if ($tianbaBin) {
-        Write-Success "tianba CLI registered: $($tianbaBin.Source)"
+    if (Test-Path "$VenvDir\Scripts\tianba.exe") {
+        Write-Success "tianba CLI registered in venv."
+        Write-Success "   Use: .\tianba.bat  (from project root)"
     } else {
-        Write-Warn "tianba CLI not in PATH. You can use: $PythonCmd -m cli.cli"
-        Write-Warn "To fix permanently, add Python Scripts directory to your system PATH."
+        Write-Warn "tianba CLI registration failed. Use: $VenvPython -m cli"
     }
 }
 
@@ -341,26 +344,26 @@ function New-ConfigFile {
     Write-Success "Configuration file created."
 }
 
-# ── start via tianba CLI ─────────────────────────────────────────────
+# ── start via venv python ──────────────────────────────────────────
 function Start-TianbaAgent {
     Write-Success "Starting TianbaAgent..."
-    $tianbaBin = Get-Command tianba -ErrorAction SilentlyContinue
-    if ($tianbaBin) {
-        & tianba start
+    $VenvPython = "$BaseDir\.venv\Scripts\python.exe"
+    if (Test-Path $VenvPython) {
+        & $VenvPython -m cli start
     } else {
-        Write-Warn "tianba CLI not found, starting directly..."
+        Write-Warn ".venv not found, starting directly..."
         & $PythonCmd "$BaseDir\app.py"
     }
 }
 
-# ── delegate management commands to tianba CLI ──────────────────────
+# ── delegate management commands to venv python ────────────────────
 function Invoke-TianbaCommand {
     param([string]$Cmd)
-    $tianbaBin = Get-Command tianba -ErrorAction SilentlyContinue
-    if ($tianbaBin) {
-        & tianba $Cmd
+    $VenvPython = "$BaseDir\.venv\Scripts\python.exe"
+    if (Test-Path $VenvPython) {
+        & $VenvPython -m cli $Cmd
     } else {
-        Write-Err "tianba CLI not found. Run this script without arguments first to install."
+        Write-Err ".venv not found. Run this script without arguments first to install."
         exit 1
     }
 }
@@ -435,10 +438,10 @@ function Update-Project {
     Set-Location $BaseDir
 
     # Stop if running
-    $tianbaBin = Get-Command tianba -ErrorAction SilentlyContinue
-    if ($tianbaBin) {
+    $VenvPython = "$BaseDir\.venv\Scripts\python.exe"
+    if (Test-Path $VenvPython) {
         $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-        & tianba stop 2>&1 | Out-Null
+        & $VenvPython -m cli stop 2>&1 | Out-Null
         $ErrorActionPreference = $prevEAP
     }
 
@@ -462,7 +465,12 @@ function Update-Project {
     # Start via python -m cli.cli instead of tianba.exe, because the exe may
     # still be cached/locked from the previous installation on Windows.
     Write-Success "Starting TianbaAgent..."
-    & $PythonCmd -m cli.cli start
+    $VenvPython = "$BaseDir\.venv\Scripts\python.exe"
+    if (Test-Path $VenvPython) {
+        & $VenvPython -m cli start
+    } else {
+        & $PythonCmd -m cli start
+    }
 }
 
 # ── main ──────────────────────────────────────────────────────────

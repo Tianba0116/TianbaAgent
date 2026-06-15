@@ -236,27 +236,36 @@ clone_project() {
 # Install dependencies
 install_dependencies() {
     echo -e "${GREEN}📦 Installing dependencies...${NC}"
+
+    # Create venv for isolated install (no global Python pollution)
+    VENV_DIR="${BASE_DIR}/.venv"
+    if [ ! -f "${VENV_DIR}/bin/python3" ]; then
+        echo -e "${YELLOW}Creating virtual environment at ${VENV_DIR}...${NC}"
+        $PYTHON_CMD -m venv "${VENV_DIR}"
+        echo -e "${GREEN}✅ Virtual environment created.${NC}"
+    else
+        echo -e "${GREEN}✅ Using existing virtual environment.${NC}"
+    fi
+
+    # All pip operations inside venv — no system pollution, no --break-system-packages needed
+    local VENV_PYTHON="${VENV_DIR}/bin/python3"
+    local VENV_PIP="${VENV_DIR}/bin/pip"
+
     local PIP_MIRROR=""
     if curl -s --connect-timeout 5 https://pypi.tuna.tsinghua.edu.cn/simple/ > /dev/null 2>&1; then
         PIP_MIRROR="-i https://pypi.tuna.tsinghua.edu.cn/simple"
     fi
 
-    PIP_EXTRA_ARGS=""
-    if $PYTHON_CMD -c "import sys; exit(0 if sys.version_info >= (3, 11) else 1)" 2>/dev/null; then
-        PIP_EXTRA_ARGS="--break-system-packages"
-        echo -e "${YELLOW}Python 3.11+ detected, using --break-system-packages for pip installations${NC}"
-    fi
-
-    echo -e "${YELLOW}Upgrading pip and basic tools...${NC}"
+    echo -e "${YELLOW}Upgrading pip and basic tools (inside venv)...${NC}"
     set +e
-    $PYTHON_CMD -m pip install --upgrade pip setuptools wheel importlib_metadata --ignore-installed $PIP_EXTRA_ARGS $PIP_MIRROR > /tmp/pip_upgrade.log 2>&1
+    $VENV_PYTHON -m pip install --upgrade pip setuptools wheel $PIP_MIRROR > /tmp/pip_upgrade.log 2>&1
     [ $? -ne 0 ] && echo -e "${YELLOW}⚠️  Some tools failed to upgrade, but continuing...${NC}"
     set -e
     rm -f /tmp/pip_upgrade.log
 
-    echo -e "${YELLOW}Installing project dependencies...${NC}"
+    echo -e "${YELLOW}Installing project dependencies (inside venv)...${NC}"
     set +e
-    $PYTHON_CMD -m pip install -r requirements.txt $PIP_EXTRA_ARGS $PIP_MIRROR > /tmp/pip_install.log 2>&1
+    $VENV_PIP install -r requirements.txt $PIP_MIRROR > /tmp/pip_install.log 2>&1
     local exit_code=$?
     set -e
     cat /tmp/pip_install.log
@@ -264,21 +273,14 @@ install_dependencies() {
     if [ $exit_code -eq 0 ]; then
         echo -e "${GREEN}✅ Dependencies installed successfully.${NC}"
     elif grep -qE "distutils installed project|uninstall-no-record-file|installed by debian" /tmp/pip_install.log; then
-        echo -e "${YELLOW}⚠️  Detected system package conflict, retrying with workaround...${NC}"
+        echo -e "${YELLOW}⚠️  Detected package conflict, retrying with workaround...${NC}"
         local IGNORE_PACKAGES=""
         for pkg in PyYAML setuptools wheel certifi charset-normalizer; do
             IGNORE_PACKAGES="$IGNORE_PACKAGES --ignore-installed $pkg"
         done
         set +e
-        $PYTHON_CMD -m pip install -r requirements.txt $IGNORE_PACKAGES $PIP_EXTRA_ARGS $PIP_MIRROR \
+        $VENV_PIP install -r requirements.txt $IGNORE_PACKAGES $PIP_MIRROR \
             && echo -e "${GREEN}✅ Dependencies installed successfully (workaround applied).${NC}" \
-            || echo -e "${YELLOW}⚠️  Some dependencies may have issues, but continuing...${NC}"
-        set -e
-    elif grep -q "externally-managed-environment" /tmp/pip_install.log; then
-        echo -e "${YELLOW}⚠️  Detected externally-managed environment, retrying with --break-system-packages...${NC}"
-        set +e
-        $PYTHON_CMD -m pip install -r requirements.txt --break-system-packages $PIP_MIRROR \
-            && echo -e "${GREEN}✅ Dependencies installed successfully (system packages override applied).${NC}" \
             || echo -e "${YELLOW}⚠️  Some dependencies may have issues, but continuing...${NC}"
         set -e
     else
@@ -287,16 +289,20 @@ install_dependencies() {
 
     rm -f /tmp/pip_install.log
 
-    # Register `tianba` CLI command via editable install
-    echo -e "${YELLOW}Registering tianba CLI...${NC}"
+    # Register `tianba` CLI inside venv (available at .venv/bin/tianba)
+    echo -e "${YELLOW}Registering tianba CLI (inside venv)...${NC}"
     set +e
-    $PYTHON_CMD -m pip install -e . $PIP_EXTRA_ARGS $PIP_MIRROR > /dev/null 2>&1
-    if command -v tianba &> /dev/null; then
-        echo -e "${GREEN}✅ tianba CLI registered.${NC}"
+    $VENV_PIP install -e . $PIP_MIRROR > /dev/null 2>&1
+    if [ -f "${VENV_DIR}/bin/tianba" ]; then
+        echo -e "${GREEN}✅ tianba CLI registered in venv.${NC}"
+        echo -e "${GREEN}   Use: ./tianba  (from project root)${NC}"
     else
-        echo -e "${YELLOW}⚠️  tianba CLI not in PATH, you can still use: $PYTHON_CMD -m cli.cli${NC}"
+        echo -e "${YELLOW}⚠️  tianba CLI registration failed. Use: $VENV_PYTHON -m cli${NC}"
     fi
     set -e
+
+    # Update wrapper to use venv
+    export PYTHON_CMD="${VENV_PYTHON}"
 }
 
 # Select model
@@ -591,14 +597,15 @@ start_project() {
     echo -e "${GREEN}${EMOJI_ROCKET} Starting TianbaAgent...${NC}"
     sleep 1
 
-    local USE_TIANBA=false
-    if command -v tianba &> /dev/null; then
-        USE_TIANBA=true
+    # Use venv if available, otherwise fall back to system python
+    local RUN_PYTHON="${BASE_DIR}/.venv/bin/python3"
+    if [ ! -f "${RUN_PYTHON}" ]; then
+        RUN_PYTHON="${PYTHON_CMD}"
     fi
 
-    if $USE_TIANBA; then
+    if has_tianba; then
         cd "${BASE_DIR}"
-        tianba start --no-logs
+        "${RUN_PYTHON}" -m cli start --no-logs
     else
         if [ ! -f "${BASE_DIR}/nohup.out" ]; then
             touch "${BASE_DIR}/nohup.out"
@@ -607,11 +614,11 @@ start_project() {
         OS_TYPE=$(uname)
 
         if [[ "$OS_TYPE" == "Linux" ]]; then
-            nohup setsid $PYTHON_CMD "${BASE_DIR}/app.py" > "${BASE_DIR}/nohup.out" 2>&1 &
-            echo -e "${GREEN}${EMOJI_AGENT} TianbaAgent started on Linux (using $PYTHON_CMD)${NC}"
+            nohup setsid $RUN_PYTHON "${BASE_DIR}/app.py" > "${BASE_DIR}/nohup.out" 2>&1 &
+            echo -e "${GREEN}${EMOJI_AGENT} TianbaAgent started on Linux (using $RUN_PYTHON)${NC}"
         elif [[ "$OS_TYPE" == "Darwin" ]]; then
-            nohup $PYTHON_CMD "${BASE_DIR}/app.py" > "${BASE_DIR}/nohup.out" 2>&1 &
-            echo -e "${GREEN}${EMOJI_AGENT} TianbaAgent started on macOS (using $PYTHON_CMD)${NC}"
+            nohup $RUN_PYTHON "${BASE_DIR}/app.py" > "${BASE_DIR}/nohup.out" 2>&1 &
+            echo -e "${GREEN}${EMOJI_AGENT} TianbaAgent started on macOS (using $RUN_PYTHON)${NC}"
         else
             echo -e "${RED}❌ Unsupported OS: ${OS_TYPE}${NC}"
             exit 1
@@ -626,15 +633,12 @@ start_project() {
     echo -e "${CYAN}$ACCESS_INFO${NC}"
     echo ""
     echo -e "${CYAN}${BOLD}Management Commands:${NC}"
-    if $USE_TIANBA; then
-        echo -e "  ${GREEN}tianba stop${NC}       Stop the service"
-        echo -e "  ${GREEN}tianba restart${NC}    Restart the service"
-        echo -e "  ${GREEN}tianba status${NC}     Check status"
-        echo -e "  ${GREEN}tianba logs${NC}       View logs"
-        echo -e "  ${GREEN}tianba update${NC}     Update and restart"
-        echo -e "  ${GREEN}tianba install-browser${NC}  Install browser tool"
-    else
-        echo -e "  ${GREEN}./run.sh stop${NC}       Stop the service"
+    echo -e "  ${GREEN}./tianba${NC}          Launch interactive CLI"
+    echo -e "  ${GREEN}./run.sh stop${NC}       Stop the service"
+    echo -e "  ${GREEN}./run.sh restart${NC}    Restart the service"
+    echo -e "  ${GREEN}./run.sh status${NC}     Check status"
+    echo -e "  ${GREEN}./run.sh logs${NC}       View logs"
+    echo -e "  ${GREEN}./run.sh update${NC}     Update and restart"
         echo -e "  ${GREEN}./run.sh restart${NC}    Restart the service"
         echo -e "  ${GREEN}./run.sh status${NC}     Check status"
         echo -e "  ${GREEN}./run.sh logs${NC}       View logs"
@@ -692,9 +696,9 @@ is_running() {
     [ -n "$(get_pid)" ]
 }
 
-# Check if tianba CLI is available
+# Check if venv tianba wrapper is available
 has_tianba() {
-    command -v tianba &> /dev/null
+    [ -f "${BASE_DIR}/tianba" ] && [ -f "${BASE_DIR}/.venv/bin/python3" ]
 }
 
 # Start service
@@ -707,7 +711,7 @@ cmd_start() {
 
     if has_tianba; then
         cd "${BASE_DIR}"
-        tianba start
+        "${BASE_DIR}/.venv/bin/python3" -m cli start
     else
         if is_running; then
             echo -e "${YELLOW}${EMOJI_WARN} TianbaAgent is already running (PID: $(get_pid))${NC}"
@@ -723,7 +727,7 @@ cmd_start() {
 cmd_stop() {
     if has_tianba; then
         cd "${BASE_DIR}"
-        tianba stop
+        "${BASE_DIR}/.venv/bin/python3" -m cli stop
     else
         echo -e "${GREEN}${EMOJI_STOP} Stopping TianbaAgent...${NC}"
 
@@ -756,7 +760,7 @@ cmd_stop() {
 cmd_restart() {
     if has_tianba; then
         cd "${BASE_DIR}"
-        tianba restart
+        "${BASE_DIR}/.venv/bin/python3" -m cli restart
     else
         cmd_stop
         sleep 1
@@ -768,7 +772,7 @@ cmd_restart() {
 cmd_status() {
     if has_tianba; then
         cd "${BASE_DIR}"
-        tianba status
+        "${BASE_DIR}/.venv/bin/python3" -m cli status
     else
         echo -e "${CYAN}${BOLD}=========================================${NC}"
         echo -e "${CYAN}${BOLD}   ${EMOJI_AGENT} TianbaAgent Status${NC}"
@@ -800,7 +804,7 @@ cmd_status() {
 cmd_logs() {
     if has_tianba; then
         cd "${BASE_DIR}"
-        tianba logs -f
+        "${BASE_DIR}/.venv/bin/python3" -m cli logs -f
     else
         if [ -f "${BASE_DIR}/nohup.out" ]; then
             echo -e "${YELLOW}Viewing logs (Ctrl+C to exit):${NC}"
